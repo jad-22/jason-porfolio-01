@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Jason's Portfolio</title>
+	<script src="https://kit.fontawesome.com/dff33f29c3.js" crossorigin="anonymous"></script>
+	<style>
+		body {
+			font-family: Arial, sans-serif;
+			background-color: #f5f5f5;
+			margin: 0;
+		}
+		.container {
+			max-width: 960px;
+			margin: 0 auto;
+			padding: 2rem;
+			box-sizing: border-box;
+		}
+		h1 {
+			font-size: 3rem;
+			margin-bottom: 1rem;
+			color: #0077c2;
+			text-align: center;
+		}
+		h2 {
+			font-size: 2rem;
+			margin-bottom: 1rem;
+			color: #0077c2;
+		}
+		ul {
+			list-style-type: none;
+			padding: 0;
+			margin: 0;
+			display: flex;
+			flex-wrap: wrap;
+			justify-content: center;
+		}
+		li {
+			margin: 1rem;
+			background-color: #ffffff;
+			box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+			border-radius: 0.25rem;
+			flex: 1 0 600px;
+			min-width: 300px;
+			overflow: hidden;
+			transition: all 0.2s ease-in-out;
+		}
+		li:hover {
+			transform: translateY(-5px);
+			box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+		}
+		li a {
+			display: block;
+			padding: 1rem;
+			font-size: 1.2rem;
+			color: #333333;
+			text-decoration: none;
+			transition: all 0.2s ease-in-out;
+		}
+		li a:hover {
+			color: #0077c2;
+		}
+		li p {
+			margin: 0;
+			padding: 1rem;
+			font-size: 1.2rem;
+			color: #666666;
+			line-height: 1.5;
+			text-align: justify;
+			height: 150px;
+			overflow: hidden;
+		}
+		li .button {
+			margin: 1rem;
+			padding: 0.5rem 1rem;
+			background-color: #0077c2;
+			color: #ffffff;
+			border: none;
+			border-radius: 0.25rem;
+			font-size: 1rem;
+			text-transform: capitalize;
+			cursor: pointer;
+			transition: all 0.2s ease-in-out;
+		}
+		li .button:hover {
+			background-color: #005ea5;
+		}
+		.contact-icons {
+			display: flex;
+			justify-content: center;
+			margin-top: 2rem;
+		}
+
+		.contact-icons a {
+			color: #999;
+			margin: 0 1rem;
+			font-size: 2rem;
+			transition: color 0.2s;
+		}
+		.contact-icons a:hover {
+			color: #0077b5;
+		}
+		.skills-list {
+			margin: 8px;
+			padding: 8px;
+			list-style: none;
+			text-align: left;
+			justify-content: left;
+		}
+		.skill-tag {
+			display: inline-block;
+			background-color: #6e5494;
+			color: #fff;
+			padding: 4px 8px;
+			margin-right: 8px;
+			margin-bottom: 8px;
+			border-radius: 8px;
+			font-size: 14px;
+			font-weight: 600;
+		}
+		.action-tag {
+			display: inline-block;
+			background-color: #883b3b;
+			color: #fff;
+			padding: 4px 8px;
+			margin-right: 8px;
+			margin-bottom: 8px;
+			border-radius: 8px;
+			font-size: 14px;
+			font-weight: 600;
+		}
+		.front-image {
+			display: block;
+			margin: auto;
+			max-width: fit-content;
+			width: 90%;
+			height: auto;
+		}
+		
+	</style>
+</head>
+<body>
+	<div class="container">
+		<header>
+			<h1>Jason's Portfolio</h1>
+		</header>
+		<main>
+			<section>
+				<h2>About Me</h2>
+				<div>
+					<img src="profile.png" alt="Profile Picture">
+					<p>
+						In my previous work experience, I spent about ~40% of my time building C-suite level decks, another ~40% on analysis and the remaining ~20% on projects.
+										And as a Business Analytics student, I am also studying various fields of analytics such as data visualisation, network analytics and machine learning.
+					</p>
+					
+				</div>
+			</section>
+			<section>
+				<h2>Project Highlights</h2>
+				<ul id="project-list">
+					<li>
+						<a href="projects/project1/Ipsos_Project 1_Topic Modelling_Group 6_3.25v2.0_updated.pdf">
+							<h3>Project 1 - Topic modelling of web browsing activities</h3>
+							<img class="front-image" src="images\project1-front.png" alt="Project 1 Front Image">
+						</a>
+						<ul class="skills-list">
+							<span class="action-tag">NLP</span>
+							<span class="action-tag">Web Scraping</span>
+							<span class="skill-tag">Python</span>
+							<span class="skill-tag">SpaCy</span>
+							<span class="skill-tag">NLTK</span>
+							<span class="skill-tag">Pandas</span>
+						</ul>
+						<p>
+							<b>Data source: Ipsos</b>
+							<br><b>Background:</b>
+							Group project based on real customer web-browsing data provided by Ipsos. 
+							The objective is to recommend customer's potential topics of interest based on web history.
+							<br><b>Contribution:</b> Algorithm design, Topic modelling research & scripting, Benchmarking & evaluation, Slide writing, Presentation
+						</p>
+						<button onclick="window.location.href='https://www.example.com'" class="button">View Details</button>
+					</li>
+					<li>
+						<a href="#">
+							<h3>Project 2 - Marketting mix modelling (MMM) on promotion effectiveness</h3>
+							<img class="front-image" src="images\project2-front.png" alt="Project 2 Front Image">
+						</a>
+						<ul class="skills-list">
+							<span class="action-tag">MMM</span>
+							<span class="action-tag">Regression analysis</span>
+							<span class="skill-tag">Python</span>
+							<span class="skill-tag">R</span>
+						</ul>
+						<p>
+							<b>Data source: Dunnhumby</b>
+							<br><b>Background:</b>
+							Individual marketing project based on real consumer data publicly available at Dunnhumby's page.
+							The objective is to study the impact of various in-store promotion on sales.
+							<br><b>Contribution:</b> Data wrangling, EDA, Modelling
+						</p>
+						<button class="button">View Details</button>
+					</li>
+					<li>
+						<a href="#">
+							<h3>Project 3 - Insights through data visualisation </h3>
+							<img class="front-image" src="images\project3-front.png" alt="Project 3 Front Image">
+						</a>
+						<ul class="skills-list">
+							<span class="action-tag">EDA</span>
+							<span class="action-tag">Visualisation</span>
+							<span class="skill-tag">Tableau</span>
+							<span class="skill-tag">R</span>
+							<span class="skill-tag">ggplot</span>
+						</ul>
+						<p>
+							<b>Data source: Olist</b>
+							<br><b>Background:</b>
+							Group project based on a Brazilian e-commerce data publicly available at Olist's Kaggle page.
+							The objective is to provide recommendations by validating hypotheses and drawing key insights using data visualisation techniques.
+							<br><b>Contribution:</b> Data wrangling, Data visualisation, Data storytelling, Slide writing, Presentation
+						</p>
+						<button class="button">View Details</button>
+					</li>
+					<li>
+						<a href="#">
+							<h3>Project 4 - SPDR MA cross-over evaluation</h3>
+							<img class="front-image" src="images\project4-front.png" alt="Project 4 Front Image">
+						</a>
+						<ul class="skills-list">
+							<span class="action-tag">EDA</span>
+							<span class="action-tag">Visualisation</span>
+							<span class="skill-tag">Python</span>
+						</ul>
+						<p>
+							<b>Background:</b> A personal project in an attempt to evaluate the possiblity of using moving averages to time the buy and sell of SPY ETF.
+						</p>
+						<button class="button">View Details</button>
+					</li>
+				</ul>
+			</section>
+			<section>
+				<h2>Connect With Me</h2>
+				<div class="contact-icons">
+					<a href="mailto:jason.darsono22@imperial.ac.uk" target="_blank" rel="noopener noreferrer"><i class="far fa-envelope"></i></a>
+					<a href="https://www.linkedin.com/in/jasonariyanto" target="_blank" rel="noopener noreferrer"><i class="fab fa-linkedin"></i></a>
+					<a href="https://github.com/jad-22" target="_blank" rel="noopener noreferrer"><i class="fab fa-github"></i></a>
+					<a href="https://medium.com/@jasonadarsono" target="_blank" rel="noopener noreferrer"><i class="fab fa-medium"></i></a>
+				</div>
+			</section>
+		</main>
+		<footer>
+			<p>&copy; 2023 Jason's Portfolio</p>
+		</footer>
+	</div>
+</body>
+</html>
