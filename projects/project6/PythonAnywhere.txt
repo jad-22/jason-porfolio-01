@@ -1,0 +1,27 @@
+PythonAnywhere
+
+Username: jasondarsono22
+Email: jason.darsono22@imperial.ac.uk
+Password: J6qs.FQF#!SMv_J
+
+
+API Token: dc077673f5e84c5153dc51bd2df9adfac163ba7c
+
+
+Authorization Code:
+
+import requests
+username = 'jasondarsono22'
+token = 'dc077673f5e84c5153dc51bd2df9adfac163ba7c'
+
+response = requests.get(
+    'https://eu.pythonanywhere.com/api/v0/user/{username}/cpu/'.format(
+        username=username
+    ),
+    headers={'Authorization': 'Token {token}'.format(token=token)}
+)
+if response.status_code == 200:
+    print('CPU quota info:')
+    print(response.content)
+else:
+    print('Got unexpected status code {}: {!r}'.format(response.status_code, response.content))
