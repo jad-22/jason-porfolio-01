@@ -1,0 +1,909 @@
+---
+title: "EA-Load Demand Forecast V4"
+author: "Jason Darsono"
+date: "2023-03-10"
+output: html_document
+---
+
+```{r setup,  include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,  cache = TRUE)
+
+library(tidyverse)
+library(patchwork)
+library(forecast)
+library(tseries)
+library(ggplot2)
+library(dplyr)
+library(car)
+library(lubridate)
+library(neuralnet)
+```
+
+
+
+# Process and explore the data
+
+**Load dataset**
+
+Note: Data has been merged and processed in Excel separately.
+
+```{r load-data}
+data <- read_csv("data_2023-03-20.csv")
+data <- filter(data, !is.na(date))
+head(data)
+```
+
+**Visualise data**
+
+```{r eda}
+# temperature seems to have non-linear relationship with load demand
+# therefore we may want to use 2nd order polynomial to capture this relationship
+data %>% 
+  mutate(avg_temp_london = (temp_london_00h + temp_london_06h + temp_london_12h + temp_london_18h)/4) %>%
+  ggplot(aes(x=avg_temp_london, y=total_demand)) +
+    geom_point() +
+    stat_smooth(formula=y ~ poly(x, 2))
+
+# generally linear and downward trend with increase in sunshine
+data %>% 
+  ggplot(aes(x=sunshine_london, y=total_demand)) +
+    geom_point() +
+    stat_smooth()
+
+# Ordering for days
+days_name <- c("Mon" , "Tue" , "Wed" , "Thu" , "Fri" , "Sat" , "Sun")
+
+# Comparing weekends and weekdays, on average weekends has lower demand
+data %>%
+  group_by(day_of_week, weekend) %>%
+  summarise(avg_demand = mean(total_demand, na.rm=T), .groups="drop") %>%
+  ggplot(aes(x=factor(day_of_week, levels = days_name), y=avg_demand)) +
+    geom_bar(aes(fill=weekend), stat="identity", show.legend=F) +
+    labs(x="day")
+
+# View seasonality across different days of the week
+data %>%
+  ggplot(aes(x=factor(day_of_week, levels = days_name), y=total_demand)) +
+    geom_boxplot() + labs(x="day")
+
+# Get the month for each row
+data <- data %>% 
+  mutate(month = month(date))
+
+# View seasonality across different months, 
+# effects on different month seem to be significant
+data %>%
+  ggplot(aes(x=as.factor(month), y=total_demand)) +
+    geom_boxplot() + labs(x="month")
+
+# Splitting dataset based on holidays, in general holidays are lower
+# than their non-holiday counterpart, except for saturdays
+data %>%
+  group_by(day_of_week, holiday) %>%
+  summarise(avg_demand = mean(total_demand, na.rm=T), .groups="drop") %>%
+  ggplot(aes(x=factor(day_of_week, levels = days_name), y=avg_demand)) +
+    geom_bar(aes(fill=holiday), stat="identity", show.legend=F) +
+    facet_wrap(~ holiday) + labs(x="day")
+
+
+# View covid stringency v.s. demand
+data %>%
+  mutate(post_covid = (stringency > 0)) %>%
+  ggplot(aes(x=as.factor(month), y=total_demand, color=post_covid)) +
+    geom_jitter(alpha=0.6)
+
+# View demand v.s. gas prices
+data %>%
+  ggplot(aes(x=date)) +
+    geom_rect(xmin=ymd(20200401), xmax=ymd(20230210),
+              ymin=0, ymax=380, fill="lightblue", alpha=0.01) +
+    geom_line(aes(y=avg_gas_index), color="orange") +
+    geom_line(aes(y=total_demand/100), color="navy", alpha=0.5) +
+    scale_y_continuous(name="gas",
+                       sec.axis = sec_axis(~. * 100,
+                                           name="demand")) +
+    theme_minimal() +
+    theme(panel.grid.minor=element_blank(),
+          panel.grid.major.x=element_blank())
+```
+
+
+**Transform data**
+
+Add monthly dummy variables to capture monthly seasonality (as shown in boxplot above),  apply log transformation to the demand and get second order polynomial for temperature.
+
+```{r transformation}
+# Create dummy variables for each months by
+# tabulating the month into matrix
+data[month.abb] <-  t(sapply(data$month, tabulate, 12))
+
+# Note: later to drop January (use as base) 
+# since num. dummy vars used should be (n-1)
+
+# Apply log scale transformation and 2nd order polynomial
+data <- data %>%
+  mutate(ldemand = log(total_demand), 
+         temp_london_00h_sq = (temp_london_00h)**2, 
+         temp_london_06h_sq = (temp_london_06h)**2, 
+         temp_london_12h_sq = (temp_london_12h)**2, 
+         temp_london_18h_sq = (temp_london_18h)**2, 
+         temp_bristol_00h_sq = (temp_bristol_00h)**2, 
+         temp_bristol_06h_sq = (temp_bristol_06h)**2, 
+         temp_bristol_12h_sq = (temp_bristol_12h)**2, 
+         temp_bristol_18h_sq = (temp_bristol_18h)**2, 
+         temp_leeds_00h_sq = (temp_leeds_00h)**2, 
+         temp_leeds_06h_sq = (temp_leeds_06h)**2, 
+         temp_leeds_12h_sq = (temp_leeds_12h)**2, 
+         temp_leeds_18h_sq = (temp_leeds_18h)**2
+  ) %>% filter(date >= ymd("2020-06-01"))
+
+head(data)
+```
+
+
+
+# Time-series analysis
+
+**Visualise load demand time-series**
+
+Capture as time series data using `ts()` and multi-seasonality time series data using `msts()` since we may observe multiple seasonality in months and years.
+
+```{r tsa-1}
+##----- normal time-series conversion -----##
+# Convert into timeseries data
+ts_data <- ts(data, frequency = 365, start = decimal_date(ymd("2019-01-01")))
+
+# Visualise the load demand across the period
+ts_data[,17] %>%
+  autoplot()
+
+# Decompose time series of log(demand) into trend and seasonality
+# Seasonality is highly significant based on the grey bar on RHS
+ts_data[,36] %>%
+  stl(s.window = 7) %>%
+  autoplot()
+
+##----- multi-seasonal time-series conversion -----##
+# Convert into multi-seasonal time series with month, quarter and year seasonality
+msts_data <- msts(data, seasonal.periods=c(30, 90, 365),
+                   start=decimal_date(ymd("2019-01-01")))[,36] 
+
+# Decompose into multi-seasonality (month, quarter, year) and trend
+msts_data %>% 
+  mstl(s.window="periodic") %>%
+  autoplot()
+
+# Try fourier and multi-season timeseries (msts)
+#msts(data, seasonal.periods=c(30, 90, 365), start=decimal_date(ymd("2019-01-01")))[,34] %>%
+#  fourier(K=c(3, 3, 3))
+```
+
+
+**Stationarity test**
+
+Check for stationarity using ADF, PP and KPSS test.
+
+```{r stationarity}
+# stationarity tests using Augmented Dicky-Fuller test
+adf.test(ts_data[,36])
+# p-value > 0.05, therefore fail to reject null hypothesis at 5% level
+# data is non-stationary
+
+# stationarity tests using Phillips-Perron test
+pp.test(ts_data[,36])
+# p-value < 0.01, therefore reject null hypothesis for unit root
+# unit root is not present, and data is stationary
+
+# stationarity tests using KPSS test
+kpss.test(ts_data[,36])
+# p-value > 0.01, therefore fail to reject null hypothesis at 1% level
+# hence data is stationary
+```
+
+
+**ACF/PACF**
+
+```{r acf}
+p_acf0 <- ggAcf(ts_data[,36], lag.max=30)
+p_pacf0 <- ggPacf(ts_data[,36], lag.max=30)
+
+p_acf0 / p_pacf0
+# need to take diff
+
+# taking diff lag=7 since ts repeats every 7 days
+p_acf1 <- ggAcf(diff(ts_data[,36], lag=7), lag.max=30)
+p_pacf1 <- ggPacf(diff(ts_data[,36], lag=7), lag.max=30)
+
+p_acf1 / p_pacf1
+# MA model with Q = 4
+# D = 1 (with lag 7)
+
+# Check the order of differences 
+ndiffs(ts_data[,36]) ## d=1
+nsdiffs(ts_data[,36]) ## D=1
+```
+
+
+# Model fitting and selection
+
+**Train-test split for model evaluation**
+
+Use 80% of the data as training, then evaluate the model with 20% remaining as test data.
+
+```{r train-test}
+train_idx <- round(nrow(data) * 0.8)
+
+train <- data[1:train_idx, ]
+test <- data[(train_idx+1):(nrow(data)), ]
+
+ts_train <- ts(train, frequency=365, start=c(0,1))
+ts_test <- ts(test, frequency=365, start=c(0,train_idx + 1))
+```
+
+
+## **Use `auto.arima` with Fourier approximation for seasonality**
+
+```{r arima}
+# Run arima with different fourier max order K, select K with lowest AICc
+msts_train <- msts(train, seasonal.periods=c(7, 30, 90, 365), start=c(0,1))
+msts_test <- msts(test, seasonal.periods=c(7, 30, 90, 365), start=c(0,train_idx + 1))
+
+#l <- c()
+#i <- 0
+#for (k1 in 3:3) {
+#  for (k2 in 1:1) {
+#    for (k3 in 2:5) {
+#      for (k4 in 2:5) {
+#        i <- i + 1
+#        cat("i:", i, "k:", k1, k2, k3, k4)
+#        freg <- fourier(msts_train[,34], K=c(k1, k2, k3, k4))
+#        fit.arima <- msts_train[,34] %>% auto.arima(seasonal = FALSE, xreg=freg)
+#        npar <- length(fit.arima$coef) + 1
+#        nstar <- length(fit.arima$residuals) - fit.arima$arma[6] - fit.arima$arma[7] * fit.arima$arma[5]
+#        aicc <- AIC(fit.arima) + 2 * npar * (nstar/(nstar - npar - 1) - 1)
+#        l <- c(l,aicc)
+#        cat("AICc:", aicc, "\n")
+#      }
+#    }
+#  }
+#}
+
+# k: 3 1 2 3 AICc: -4305.603 
+
+#  cat("k:", k)
+#  freg <- fourier(msts_train[,34], K=c(k)
+#  fit.arima <- msts_train[,34] %>% auto.arima(seasonal = FALSE, xreg=freg)
+#  npar <- length(fit.arima$coef) + 1
+#  nstar <- length(fit.arima$residuals) - fit.arima$arma[6] - fit.arima$arma[7] * fit.arima$arma[5]
+#  aicc <- AIC(fit.arima) + 2 * npar * (nstar/(nstar - npar - 1) - 1)
+#  l <- c(l,aicc)
+
+# we find k=2 gives the best AICc (for freq 365) and k: 3 1 2 3 AICc: -4305.603 (for msts periods 7, 30, 90, 365)
+fit.arima <- msts_train[,36] %>% auto.arima(seasonal = FALSE, xreg=fourier(msts_train[,36], K=c(3, 1, 2, 3)))
+forecast(fit.arima, h=(nrow(data) - train_idx), xreg=fourier(msts_test[,36], K=c(3, 1, 2, 3))) %>% autoplot()
+checkresiduals(fit.arima)
+
+## Passed Ljung-Box test, model fit is sufficient
+
+rmse_arima <- accuracy(forecast(fit.arima, h=(nrow(data) - train_idx), xreg=fourier(msts_test[,36], K=c(3, 1, 2, 3))), msts_test[,36])[4]
+accuracy(forecast(fit.arima, h=(nrow(data) - train_idx), xreg=fourier(msts_test[,36], K=c(3, 1, 2, 3))), msts_test[,36])
+```
+
+
+## **Use STLF model**
+
+ETS does not work with multi-seasonal long-period data. Hence we use STLF model which incorporates STL (seasonal and trend decomposition) into exponential smoothing (ETS).
+
+```{r stlf}
+fit.stlf <- ts_train[,36] %>% stlf(biasadj=TRUE)
+forecast(fit.stlf, h=(nrow(data) - train_idx)) %>% autoplot()
+
+checkresiduals(fit.stlf)
+
+## Failed Ljung-Box test, poor model fit
+
+rmse_sltf <- accuracy(forecast(fit.stlf, h=(nrow(data) - train_idx)), ts_test[,36])[4]
+accuracy(forecast(fit.stlf, h=(nrow(data) - train_idx)), ts_test[,36])
+```
+
+**Use multivariate regression model**
+
+```{r mlr-aic}
+# Check for variable selection using AIC
+train.full <- lm(ldemand ~ temp_london_00h + temp_london_06h +
+             temp_london_12h + temp_london_18h + 
+             temp_bristol_00h + temp_bristol_06h +
+             temp_bristol_12h + temp_bristol_18h +
+             temp_leeds_00h + temp_leeds_06h + 
+             temp_leeds_12h + temp_leeds_18h + 
+             sunshine_london + sunshine_bristol + sunshine_leeds +
+             temp_london_00h_sq + temp_london_06h_sq +
+             temp_london_12h_sq + temp_london_18h_sq + 
+             temp_bristol_00h_sq + temp_bristol_06h_sq +
+             temp_bristol_12h_sq + temp_bristol_18h_sq +
+             temp_leeds_00h_sq + temp_leeds_06h_sq + 
+             temp_leeds_12h_sq + temp_leeds_18h_sq +
+             ## added average gas prices (monthly) and covid stringency
+             weekend + holiday + avg_gas_index + stringency +
+             Feb + Mar + Apr + May + Jun + Jul +
+             Aug + Sep + Oct + Nov + Dec,
+           data = na.omit(train))
+train.null <- lm(ldemand ~ 1, data = na.omit(train))
+
+step(train.null, scope = list(lower=train.null, upper=train.full), direction="forward", trace=FALSE)
+```
+
+
+```{r mlr-fit}
+train.reg <- lm(formula = ldemand ~ temp_london_12h + weekend + stringency + 
+    temp_london_12h_sq + sunshine_bristol + holiday + temp_london_06h + 
+    Apr + May + Jun + sunshine_leeds + Aug + Jul + Sep + Mar + 
+    sunshine_london + Oct + temp_london_06h_sq + temp_leeds_06h + 
+    temp_leeds_18h_sq + temp_london_00h_sq + temp_bristol_06h + 
+    temp_bristol_06h_sq + temp_london_00h + Feb + Dec + temp_bristol_12h_sq + 
+    temp_bristol_12h + temp_london_18h_sq + temp_leeds_12h_sq + 
+    avg_gas_index, data = na.omit(train))
+
+ts(train.reg$fitted.values, frequency=365, end=c(0, train_idx)) %>% 
+   autoplot() +
+   autolayer(ts(test[,36], frequency=365, start=c(0,train_idx +1)), show.legend=FALSE) +
+   autolayer(ts(predict(train.reg, test), frequency=365, start=c(0,train_idx +1)), show.legend=FALSE)
+
+checkresiduals(train.reg)
+
+# Significant trends and autocorrelation in residuals || AutoRegression maybe needed
+
+rmse_mlr <- sqrt(mean((predict(train.reg, test) - as.matrix(test[,36])[,1])**2))
+rmse_mlr
+```
+
+
+## Use neural network
+
+**Use neural network for prediction**
+
+```{r nn-1}
+#set.seed(123)
+#l <- c()
+#for (k in 7:20) {
+#  fit.nn <- neuralnet(
+#     ldemand ~  temp_london_00h + temp_london_00h_sq + temp_london_06h + temp_london_06h_sq + 
+#                temp_london_12h + temp_london_12h_sq + temp_london_18h + temp_london_18h_sq +
+#                temp_bristol_00h + temp_bristol_00h_sq + temp_bristol_06h + temp_bristol_06h_sq +
+#                temp_bristol_12h + temp_bristol_12h_sq + temp_bristol_18h + temp_bristol_18h_sq +
+#                temp_leeds_00h + temp_leeds_00h_sq + temp_leeds_06h + temp_leeds_06h_sq +
+#                temp_leeds_12h + temp_leeds_12h_sq + temp_leeds_18h + temp_leeds_18h_sq +
+#                sunshine_london + sunshine_bristol + sunshine_leeds + 
+#                weekend + holiday + stringency + avg_gas_index +
+#                Feb + Mar + Apr + May + Jun + Jul + Aug + Sep + Oct + Nov + Dec, 
+#    data = na.omit(train),
+#    hidden = k,
+#    linear.output = TRUE,
+#    err.fct = 'sse')
+#  
+#  pred.nn <- neuralnet::compute(fit.nn, test)$net.result
+#  act.nn <- test$ldemand
+#  
+#  rmse_nn <- sqrt(sum((act.nn - pred.nn)**2 / nrow(test)))
+#  l <- c(l, rmse_nn)
+#  cat(k, rmse_nn, "\n")
+#}
+
+# hidden layers = 13 for best RMSE
+```
+
+```{r nn-2}
+set.seed(123)
+
+# Set hidden layer to be 13 (obtained by minimising RMSE)
+fit.nn <- neuralnet(
+     ldemand ~  temp_london_00h + temp_london_00h_sq + temp_london_06h + temp_london_06h_sq + 
+                temp_london_12h + temp_london_12h_sq + temp_london_18h + temp_london_18h_sq +
+                temp_bristol_00h + temp_bristol_00h_sq + temp_bristol_06h + temp_bristol_06h_sq +
+                temp_bristol_12h + temp_bristol_12h_sq + temp_bristol_18h + temp_bristol_18h_sq +
+                temp_leeds_00h + temp_leeds_00h_sq + temp_leeds_06h + temp_leeds_06h_sq +
+                temp_leeds_12h + temp_leeds_12h_sq + temp_leeds_18h + temp_leeds_18h_sq +
+                sunshine_london + sunshine_bristol + sunshine_leeds + 
+                weekend + holiday + stringency + avg_gas_index +
+                Feb + Mar + Apr + May + Jun + Jul + Aug + Sep + Oct + Nov + Dec, 
+    data = na.omit(train),
+    hidden = 13,
+    linear.output = TRUE,
+    err.fct = 'sse')
+  
+pred.nn <- neuralnet::compute(fit.nn, test)$net.result
+act.nn <- test$ldemand
+rmse_nn <- sqrt(sum((act.nn - pred.nn)**2 / nrow(test)))
+
+##-- From the plot seems like NN is behaving funny idk why --##
+msts_train[,36] %>% 
+  autoplot() +
+  autolayer(ts(pred.nn[,1], frequency=365, start=c(0, train_idx+1)), show.legend=FALSE) +
+  autolayer(ts(act.nn, frequency=365, start=c(0, train_idx+1)), show.legend=FALSE) 
+```
+
+
+## Multivariate regression with Fourier transformation
+
+```{r mlr-fourier-aic}
+# Append cbind fourier transform on the data
+msts_data <- msts(data, seasonal.periods=c(7, 30, 90, 365), start=c(0,1))
+fdata <- cbind(data, fourier(msts_data[,36], K=c(3, 1, 2, 3)))
+ftrain <- fdata[1:train_idx,] 
+ftest <- fdata[(train_idx + 1):nrow(fdata),]
+# Check for variable selection using AIC
+ftrain.full <- lm(ldemand ~ temp_london_00h + temp_london_06h +
+                   temp_london_12h + temp_london_18h + 
+                   temp_bristol_00h + temp_bristol_06h +
+                   temp_bristol_12h + temp_bristol_18h +
+                   temp_leeds_00h + temp_leeds_06h + 
+                   temp_leeds_12h + temp_leeds_18h + 
+                   sunshine_london + sunshine_bristol + sunshine_leeds +
+                   temp_london_00h_sq + temp_london_06h_sq +
+                   temp_london_12h_sq + temp_london_18h_sq + 
+                   temp_bristol_00h_sq + temp_bristol_06h_sq +
+                   temp_bristol_12h_sq + temp_bristol_18h_sq +
+                   temp_leeds_00h_sq + temp_leeds_06h_sq + 
+                   temp_leeds_12h_sq + temp_leeds_18h_sq +
+                   weekend + holiday + stringency + avg_gas_index +
+                   Feb + Mar + Apr + May + Jun + Jul +
+                   Aug + Sep + Oct + Nov + Dec +
+                   `S1-7` + `C1-7` + `S2-7` + `C2-7` + `S3-7` + `C3-7` +
+                   `S1-30` + `C1-30` + `S1-90` + `C1-90` + `S2-90` + `C2-90` + 
+                   `S1-365` + `C1-365` + `S2-365` + `C2-365` + `S3-365` + `C3-365`,
+               data = na.omit(ftrain))
+ftrain.null <- lm(ldemand ~ 1, data = na.omit(ftrain))
+
+step(ftrain.null, scope = list(lower=ftrain.null, upper=ftrain.full), direction="forward", trace=FALSE)
+```
+
+
+```{r mlr-fourier-fit}
+train.freg <- lm(formula = ldemand ~ `C1-365` + weekend + holiday + temp_bristol_12h + 
+    stringency + temp_bristol_12h_sq + sunshine_leeds + temp_london_06h + 
+    `C3-365` + sunshine_london + temp_london_06h_sq + `S1-7` + 
+    `S2-90` + temp_leeds_18h_sq + temp_leeds_06h + May + temp_london_00h_sq + 
+    sunshine_bristol + temp_bristol_06h + temp_london_00h + `S1-30` + 
+    temp_london_18h_sq + `C2-90` + `C2-365` + `C3-7` + temp_london_18h + 
+    avg_gas_index + temp_bristol_06h_sq + `C1-7` + Apr + Nov + 
+    temp_leeds_12h_sq + `S3-7`, data = na.omit(ftrain))
+
+ts(train.freg$fitted.values, frequency=365, end=c(0, train_idx)) %>% 
+   autoplot() +
+   autolayer(ts(ftest[,36], frequency=365, start=c(0,train_idx +1)), show.legend=FALSE, na.rm=T) +
+   autolayer(ts(predict(train.freg, ftest), frequency=365, start=c(0,train_idx +1), end=c(0, nrow(fdata))), show.legend=FALSE)
+
+## still bad ##
+checkresiduals(train.freg)
+
+rmse_freg <- sqrt(mean((predict(train.freg, ftest) - as.matrix(ftest[,36])[,1])**2))
+rmse_freg
+```
+
+## Dynamic Harmonic Regression: ARIMA with regressor
+
+```{r arima-reg-1}
+###--- Previous reg columns ---###
+#columns_reg <- c("temp_london_00h", "temp_london_06h",
+#                 "temp_london_12h", "temp_london_18h", 
+#                 "temp_bristol_12h", "temp_leeds_12h", 
+#                 "sunshine_london", "sunshine_bristol", "sunshine_leeds",
+#                 "temp_london_00h_sq", "temp_london_06h_sq",
+#                 "temp_london_12h_sq", "temp_london_18h_sq",
+#                 "temp_bristol_12h_sq", "temp_leeds_12h_sq", 
+#                 "weekend", "holiday", "stringency")
+
+###--- Use updated reg columns below ---###
+columns_reg <- c("temp_london_12h", "weekend", "stringency", "temp_london_12h_sq", "sunshine_bristol",
+                 "holiday", "temp_london_06h", "sunshine_leeds", "sunshine_london", "temp_london_06h_sq",
+                 "temp_leeds_06h", "temp_leeds_18h_sq", "temp_london_00h_sq", "temp_bristol_06h",
+                 "temp_bristol_06h_sq", "temp_london_00h", "temp_bristol_12h_sq", "temp_bristol_12h",
+                 "temp_london_18h_sq", "temp_leeds_12h_sq", "avg_gas_index")
+
+reg <- data[, columns_reg]
+reg_train <- reg[1:train_idx, ]
+reg_test <- reg[(train_idx + 1):nrow(data),]
+```
+
+
+```{r arima-reg-2}
+fit.arima.reg <- ts_train[, 36] %>% auto.arima(xreg = as.matrix(reg_train),  trace=TRUE)
+
+forecast(fit.arima.reg, h=(nrow(data) - train_idx), xreg=as.matrix(reg_test)) %>% autoplot()
+
+rmse_arima.reg <- accuracy(forecast(fit.arima.reg, h=(nrow(data) - train_idx), xreg=as.matrix(reg_test)), ts_test[,36])[4]
+accuracy(forecast(fit.arima.reg, h=(nrow(data) - train_idx), xreg=as.matrix(reg_test)), ts_test[,36])
+
+###----- ARIMA + xreg model comparisons -----###
+## RMSE w/o stringency and gas prices - 0.13151529
+## RMSE with stringency and gas prices - 0.10361727
+```
+
+## Try TBATS model
+
+```{r tbats}
+train.tbats <- ts_train[,36] %>% tbats(biasadj=TRUE)
+pred.tbats <- forecast(train.tbats, h=(nrow(data) - train_idx))
+
+pred.tbats %>% autoplot()
+
+rmse_tbats <- accuracy(forecast(train.tbats, h=(nrow(data) - train_idx)), ts_test[,36])[4]
+rmse_tbats ## it's actly not bad esp for short term and capturing the trend
+```
+
+
+## **Model comparison**
+
+**Plot of different model prediction**
+
+```{r plot}
+actl_demand <- test[,36]
+arima.reg_demand <- forecast(fit.arima.reg, h=(nrow(data) - train_idx), xreg=as.matrix(reg_test))$mean
+arima.f_demand <- forecast(fit.arima, h=(nrow(data) - train_idx), xreg=fourier(msts_test[,34], K=c(3, 1, 2, 3)))$mean
+stlf_demand <- forecast(fit.stlf, h=(nrow(data) - train_idx))$mean
+mlr_demand <- predict(train.reg, test)
+mlr.f_demand <- predict(train.freg, ftest)
+nn_demand <- pred.nn[,1]
+tbats_demand <- pred.tbats$mean
+
+test_pred <- data.frame(actl_demand = actl_demand, 
+                        arima.reg_demand = arima.reg_demand,
+                        arima.f_demand = arima.f_demand,
+                        stlf_demand = stlf_demand,
+                        mlr_demand = mlr_demand,
+                        mlr.f_demand = mlr.f_demand,
+                        nn_demand = nn_demand,
+                        tbats_demand = tbats_demand)
+
+# View data
+test_pred[1:10,]
+
+# View plot
+ts(test_pred[,]) %>% autoplot()
+
+# View only selected plots
+ts(test_pred[, c(1,4:6)]) %>% autoplot()
+```
+
+**RMSE (forecast errors)**
+
+```{r rmse}
+rmse_pred <-data.frame(arima_reg = rmse_arima.reg, 
+                        arima.f = rmse_arima,
+                        sltf = rmse_sltf,
+                        mlr = rmse_mlr,
+                        mlr.f = rmse_freg,
+                        nn = rmse_nn,
+                        tbats = rmse_tbats)
+
+as.data.frame(rbind(arima_reg = rmse_arima.reg, 
+                        arima.f = rmse_arima,
+                        sltf = rmse_sltf,
+                        mlr = rmse_mlr,
+                        mlr.f = rmse_freg,
+                        nn = rmse_nn,
+                        tbats = rmse_tbats)) %>% rename(rmse=V1)
+
+```
+
+
+## What if we do a combination of forecasts by averaging the predictions ##
+
+Source: https://otexts.com/fpp2/combinations.html
+
+> "The results have been virtually unanimous: combining multiple forecasts leads to increased forecast accuracy. In many cases one can make dramatic performance improvements by simply averaging the forecasts."
+
+```{r combination}
+###---- All models ----###
+combi_all_demand <- (arima.reg_demand + arima.f_demand + stlf_demand + mlr_demand + mlr.f_demand + nn_demand + tbats_demand) / 7
+
+rmse_combi1 <- sqrt(mean((ts_test[,36] - combi_all_demand)**2))
+rmse_combi1 ## RMSE at 0.09702 better than the original individual model on average
+
+###---- Low RMSE (selected few) models ----###
+combi_few_demand <- (arima.reg_demand + stlf_demand + mlr_demand + mlr.f_demand + tbats_demand) / 5
+
+rmse_combi2 <- sqrt(mean((ts_test[,36] - combi_few_demand)**2))
+rmse_combi2 ## RMSE at 0.09379 even better, but idk how to get the standard deviation like this ....
+
+
+###---- Low RMSE (even less number) models ----###
+combi_few_demand2 <- (arima.reg_demand + mlr_demand + mlr.f_demand) / 3
+
+rmse_combi3 <- sqrt(mean((ts_test[,36] - combi_few_demand2)**2))
+rmse_combi3 ## RMSE at 0.1001 no good, use 2nd combination
+
+
+###---- What if we dont use ARIMA models ----###
+combi_few_demand3 <- (stlf_demand + mlr_demand + mlr.f_demand + tbats_demand) / 4
+
+rmse_combi4 <- sqrt(mean((ts_test[,36] - combi_few_demand3)**2))
+rmse_combi4 ## RMSE at 0.09501 its not bad
+
+###---- Weighted Combined Models based on RMSE ----###
+inv_rmse_total <- 1/rmse_arima.reg + 1/rmse_sltf + 1/rmse_mlr + 1/rmse_freg + 1/rmse_tbats
+
+combi_weighted_demand <- ((1/rmse_arima.reg) / inv_rmse_total * arima.reg_demand + 
+                          (1/rmse_sltf) / inv_rmse_total * stlf_demand +
+                          (1/rmse_mlr) / inv_rmse_total * mlr_demand +
+                          (1/rmse_freg) / inv_rmse_total * mlr.f_demand +
+                          (1/rmse_tbats) / inv_rmse_total * tbats_demand)
+
+rmse_combi_weighted <- sqrt(mean((ts_test[,36] - combi_weighted_demand)**2))
+rmse_combi_weighted ## ROUND 5: RMSE best when weighted demand is used
+```
+**We use combination of the following:**
+
+* ARIMA with Regression
+* STLF
+* Multivariate regression (MLR)
+* Multivariate regression with Fourier (MLRF)
+* TBATS
+
+
+```{r}
+stlf_limit <- 730
+index_range1 <- (nrow(train)-stlf_limit+1):nrow(train)
+index_range2 <- 1:stlf_limit
+
+combi_fitted_demand <-(
+  (1/rmse_arima.reg) / inv_rmse_total * fit.arima.reg$fitted[index_range1] + 
+    (1/rmse_sltf) / inv_rmse_total * fit.stlf$mean[index_range2] +
+    (1/rmse_mlr) / inv_rmse_total * train.reg$fitted.values[index_range1] +
+    (1/rmse_freg) / inv_rmse_total * train.freg$fitted.values[index_range1] +
+    (1/rmse_tbats) / inv_rmse_total * train.tbats$fitted.values[index_range1])
+
+#combi_weighted_demand
+
+ts(combi_fitted_demand, frequency=360, start=c(0,nrow(train)-740)) %>% autoplot(color="grey30", linewidth=0.8) +
+  autolayer(combi_weighted_demand, color="blue", linewidth=0.8) +
+  theme_bw()
+```
+
+
+###
+---
+###
+
+
+## Forecast demand for ytd, tdy and tmr
+
+
+### 1. Load and prep the latest data
+
+```{r fc-load}
+datafile <- "data_2023-03-20.csv"
+predfile <- "variables_2023-03-20.csv"
+
+pred.data <- read_csv(datafile)
+pred.vars <- read_csv(predfile)
+
+prepare <- function (data) {
+  data <- data %>% 
+    filter(!is.na(date)) %>%
+    mutate(month = month(date))
+  data[month.abb] <-  t(sapply(data$month, tabulate, 12))
+  data <- data %>%
+    mutate(ldemand = log(total_demand), 
+           temp_london_00h_sq = (temp_london_00h)**2, 
+           temp_london_06h_sq = (temp_london_06h)**2, 
+           temp_london_12h_sq = (temp_london_12h)**2, 
+           temp_london_18h_sq = (temp_london_18h)**2, 
+           temp_bristol_00h_sq = (temp_bristol_00h)**2, 
+           temp_bristol_06h_sq = (temp_bristol_06h)**2, 
+           temp_bristol_12h_sq = (temp_bristol_12h)**2, 
+           temp_bristol_18h_sq = (temp_bristol_18h)**2, 
+           temp_leeds_00h_sq = (temp_leeds_00h)**2, 
+           temp_leeds_06h_sq = (temp_leeds_06h)**2, 
+           temp_leeds_12h_sq = (temp_leeds_12h)**2, 
+           temp_leeds_18h_sq = (temp_leeds_18h)**2
+    ) 
+  return(data)
+}
+
+pred.vars <- prepare(pred.vars)
+pred.data <- prepare(pred.data)
+
+ts.pred <- ts(pred.data, frequency = 365, start = decimal_date(ymd("2019-01-01")))
+```
+
+### 2. Prep the models
+
+#### STLF Model 
+
+```{r}
+model.stlf <- ts.pred[,36] %>% stlf()
+fc_stlf <- forecast(model.stlf, h=3)
+fc_stlf
+```
+
+
+#### MLR Model
+
+```{r}
+# Check for variable selection using AIC
+full <- lm(ldemand ~ temp_london_00h + temp_london_06h +
+             temp_london_12h + temp_london_18h + 
+             temp_bristol_00h + temp_bristol_06h +
+             temp_bristol_12h + temp_bristol_18h +
+             temp_leeds_00h + temp_leeds_06h + 
+             temp_leeds_12h + temp_leeds_18h + 
+             sunshine_london + sunshine_bristol + sunshine_leeds +
+             temp_london_00h_sq + temp_london_06h_sq +
+             temp_london_12h_sq + temp_london_18h_sq + 
+             temp_bristol_00h_sq + temp_bristol_06h_sq +
+             temp_bristol_12h_sq + temp_bristol_18h_sq +
+             temp_leeds_00h_sq + temp_leeds_06h_sq + 
+             temp_leeds_12h_sq + temp_leeds_18h_sq +
+             weekend + holiday + stringency + avg_gas_index +
+             Feb + Mar + Apr + May + Jun + Jul +
+             Aug + Sep + Oct + Nov + Dec,
+           data = na.omit(pred.data))
+null <- lm(ldemand ~ 1, data = na.omit(pred.data))
+
+step(null, scope = list(lower=null, upper=full), direction="forward", trace=FALSE)
+```
+
+```{r}
+### Fit the MLR model
+model.reg <- lm(formula = ldemand ~ temp_london_12h + weekend + temp_london_12h_sq + 
+    sunshine_bristol + holiday + temp_london_06h + stringency + 
+    Apr + May + Jun + avg_gas_index + sunshine_london + temp_leeds_06h + 
+    Nov + sunshine_leeds + Aug + Jul + Sep + Oct + Mar + temp_leeds_12h_sq + 
+    temp_london_00h_sq + temp_london_00h + temp_bristol_06h + 
+    temp_leeds_12h + Feb + temp_bristol_12h_sq, data = na.omit(pred.data))
+
+fc_mlr <- predict(model.reg, pred.vars)
+fc_mlr
+```
+
+#### MLR with Fourier Model
+
+```{r}
+# Append cbind fourier transform on the data
+msts.pred <- msts(pred.data, seasonal.periods=c(7, 30, 90, 365), start=c(0,1))
+fpred.data <- cbind(pred.data, fourier(msts.pred[,36], K=c(3, 1, 2, 3)))
+
+# Check for variable selection using AIC
+f.full <- lm(ldemand ~ temp_london_00h + temp_london_06h +
+                   temp_london_12h + temp_london_18h + 
+                   temp_bristol_00h + temp_bristol_06h +
+                   temp_bristol_12h + temp_bristol_18h +
+                   temp_leeds_00h + temp_leeds_06h + 
+                   temp_leeds_12h + temp_leeds_18h + 
+                   sunshine_london + sunshine_bristol + sunshine_leeds +
+                   temp_london_00h_sq + temp_london_06h_sq +
+                   temp_london_12h_sq + temp_london_18h_sq + 
+                   temp_bristol_00h_sq + temp_bristol_06h_sq +
+                   temp_bristol_12h_sq + temp_bristol_18h_sq +
+                   temp_leeds_00h_sq + temp_leeds_06h_sq + 
+                   temp_leeds_12h_sq + temp_leeds_18h_sq +
+                   weekend + holiday + stringency + avg_gas_index +
+                   Feb + Mar + Apr + May + Jun + Jul +
+                   Aug + Sep + Oct + Nov + Dec +
+                   `S1-7` + `C1-7` + `S2-7` + `C2-7` + `S3-7` + `C3-7` +
+                   `S1-30` + `C1-30` + `S1-90` + `C1-90` + `S2-90` + `C2-90` + 
+                   `S1-365` + `C1-365` + `S2-365` + `C2-365` + `S3-365` + `C3-365`,
+               data = na.omit(fpred.data))
+f.null <- lm(ldemand ~ 1, data = na.omit(fpred.data))
+
+step(f.null, scope = list(lower=f.null, upper=f.full), direction="forward", trace=FALSE)
+```
+
+```{r}
+model.freg <- lm(formula = ldemand ~ `C1-365` + weekend + temp_london_12h + 
+    holiday + temp_london_12h_sq + sunshine_bristol + stringency + 
+    avg_gas_index + temp_london_06h + sunshine_london + `C3-365` + 
+    sunshine_leeds + `S1-7` + temp_london_00h_sq + `S2-90` + 
+    temp_leeds_18h_sq + temp_leeds_06h + Oct + temp_london_00h + 
+    Jun + Apr + `S3-7` + Sep + temp_leeds_12h_sq + temp_bristol_06h + 
+    `C2-7` + `C1-90` + temp_leeds_12h + `S2-7` + temp_bristol_12h_sq + 
+    `S1-30`, data = na.omit(fpred.data))
+
+# get fourier terms
+msts.vars <- msts(pred.vars, seasonal.periods=c(7, 30, 90, 365), start=c(0,1))
+fpred.vars <- cbind(pred.vars, fourier(msts.vars[,36], K=c(3, 1, 2, 3)))
+
+fc_mlrf <- predict(model.freg, fpred.vars)
+fc_mlrf
+```
+
+#### TBATS Model
+
+```{r}
+model.tbats <- ts.pred[,36] %>% tbats(biasadj=TRUE)
+
+fc_tbats <- forecast(model.tbats, h=3)
+fc_tbats
+```
+
+#### ARIMA with regression Model
+
+```{r}
+### Use columns form the MLR regressions, minus the months (seasonal terms)
+reg_cols <- c("temp_london_12h", "weekend", "temp_london_12h_sq", "sunshine_bristol", "holiday", "temp_london_06h", "stringency", "avg_gas_index", "sunshine_london", "temp_leeds_06h", "sunshine_leeds", "temp_leeds_12h_sq", "temp_london_00h_sq", "temp_london_00h", "temp_bristol_06h", "temp_leeds_12h", "temp_bristol_12h_sq")
+
+
+reg <- pred.data[, reg_cols]
+reg_pred <- pred.vars[,reg_cols]
+```
+
+
+```{r}
+tspred2 <- ts(pred.data, frequency=7, start=c(0,1))[,36]
+
+ggAcf(diff(tspred2), lag.max=30)
+ggPacf(diff(tspred2), lag.max=30)
+
+ggAcf(diff(tspred2, lag=7), lag.max=30)
+ggPacf(diff(tspred2, lag=7), lag.max=30)
+```
+
+
+```{r}
+#model.arima.reg <- ts.pred[, 36] %>% auto.arima(xreg = as.matrix(reg),  trace=TRUE)
+model.arima.reg <- ts(pred.data, frequency=7, start=c(0,1))[,36] %>% Arima(order=c(1,1,1), seasonal=c(1,0,1), xreg = as.matrix(reg))
+# ARIMA(1, 1, 1)(1, 0, 1) - AICc=-6380.66 <- this is lowest, tested against other p, q, P, Q parameters
+# ARIMA(1, 1, 0)(1, 0, 1) - AICc=-6293.93
+# ARIMA(0, 1, 0)(1, 0, 1) - AICc=-6248.11
+# ARIMA(0, 1, 0)(1, 0, 1) - AICc=-6323.48
+# ARIMA(2, 1, 1)(1, 0, 1) - AICc=-6330.99
+
+# Check differencing required
+ndiffs(ts.pred[,36])
+nsdiffs(ts.pred[,36])
+
+# Close enough
+fc_arima.reg <- forecast(model.arima.reg, h=3, xreg=as.matrix(reg_pred))
+fc_arima.reg
+```
+
+
+
+### 3. Get the average forecast
+
+```{r}
+###
+#avg_fitted_values <- (as.matrix(model.arima.reg$fitted) + as.matrix(model.stlf$fitted) + as.matrix(model.reg$fitted.values) + as.matrix(model.freg$fitted.values) + as.matrix(model.tbats$fitted.values))/5
+
+avg_fitted_values <- (
+  (1/rmse_arima.reg) / inv_rmse_total * as.matrix(model.arima.reg$fitted) + 
+    (1/rmse_sltf) / inv_rmse_total * as.matrix(model.stlf$fitted) +
+    (1/rmse_mlr) / inv_rmse_total * as.matrix(model.reg$fitted.values) +
+    (1/rmse_freg) / inv_rmse_total * as.matrix(model.freg$fitted.values) +
+    (1/rmse_tbats) / inv_rmse_total * as.matrix(model.tbats$fitted.values)
+  )
+
+pred_residuals <- as.matrix(pred.data[,36]) - avg_fitted_values
+sse <- sum(pred_residuals**2)
+n <- length(pred_residuals)
+sd <- sqrt(sse/(n-1))
+
+mean(
+as.matrix(pred.data[,36])[(length(avg_fitted_values)-7):length(avg_fitted_values),] / avg_fitted_values[(length(avg_fitted_values)-7):length(avg_fitted_values),]
+)
+
+###
+avg_fc <- (as.matrix(fc_arima.reg$mean) + as.matrix(fc_stlf$mean) + as.matrix(fc_mlr) + as.matrix(fc_mlrf) + as.matrix(fc_tbats$mean))/5
+avg_fc
+
+###
+correction_factor <- pred.data[nrow(pred.data),36] / avg_fc[1]
+corrected_fc2 <- correction_factor * avg_fc[2]
+corrected_fc3 <- correction_factor * avg_fc[3]
+
+###
+cat("\nYTD's prediction:", avg_fc[1], "-->", exp(avg_fc[1]))
+#cat("\nTDY's prediction:", avg_fc[2], "-->", exp(avg_fc[2]))
+#cat("\nTMR's prediction:", avg_fc[3], "-->", exp(avg_fc[3]))
+#cat("\nStandard Deviation:", sd)
+
+cat("\nCorrection Multiplier:", correction_factor[1,1], "\n")
+
+###
+cat("\nTDY's prediction:", corrected_fc2[1,1], "-->", exp(corrected_fc2[1,1]))
+cat("\nTMR's prediction:", corrected_fc3[1,1], "-->", exp(corrected_fc3[1,1]))
+cat("\nStandard Deviation:", sd)
+```
+
+
